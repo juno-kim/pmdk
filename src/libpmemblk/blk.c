@@ -24,6 +24,7 @@
 #include "set.h"
 #include "out.h"
 #include "btt.h"
+#include "btt_layout.h"
 #include "blk.h"
 #include "util.h"
 #include "sys_util.h"
@@ -698,6 +699,73 @@ pmemblk_write(PMEMblkpool *pbp, const void *buf, long long blockno)
 	lane_exit(pbp, lane);
 
 	return err;
+}
+
+PMEMblk_future *
+pmemblk_write_async(PMEMblkpool *pbp, const void *buf, long long blockno)
+{
+	LOG(3, "pbp %p buf %p blockno %lld", pbp, buf, blockno);
+
+	if (pbp->rdonly) {
+		ERR("EROFS (pool is read-only)");
+		errno = EROFS;
+		return NULL;
+	}
+
+	if (blockno < 0) {
+		ERR("negative block number");
+		errno = EINVAL;
+		return NULL;
+	}
+
+	unsigned lane;
+
+	lane_enter(pbp, &lane);
+
+	struct btt_future *bfut= btt_write_async(pbp->bttp, lane, (uint64_t)blockno, buf);
+
+	lane_exit(pbp, lane);
+
+	if (bfut == NULL) {
+		ERR("btt returns NULL future");
+		errno = EIO;
+		return NULL;
+	}
+
+	PMEMblk_future *pfut = Malloc(sizeof(PMEMblk_future));
+	pfut->future = bfut;
+
+	return pfut;
+}
+
+int
+pmemblk_write_await(PMEMblkpool *pbp, PMEMblk_future *fut)
+{
+	int ret = btt_write_await(fut->future);
+
+	return 0;
+}
+
+int
+pmemblk_get_result(PMEMblkpool *pbp, PMEMblk_future *fut)
+{
+	return fut->future->result;
+}
+
+int
+pmemblk_free_future(PMEMblkpool *pbp, PMEMblk_future *fut)
+{
+	if (fut->future) {
+		if (fut->future->future) {
+			free_future(fut->future->future);
+		}
+
+		Free(fut->future);
+	}
+
+	Free(fut);
+
+	return 0;
 }
 
 /*

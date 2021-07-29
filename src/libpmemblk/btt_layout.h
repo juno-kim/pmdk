@@ -73,6 +73,7 @@ struct btt_info {
  */
 
 #define BTT_FLOG_PAIR_ALIGN ((uintptr_t)64)
+#define BTT_FLOG_PAIR_COUNT 8
 
 struct btt_flog {
 	uint32_t lba;		/* last pre-map LBA using this entry */
@@ -90,6 +91,24 @@ struct btt_flog {
 #define BTT_MAP_ENTRY_NORMAL 0xC0000000U
 #define BTT_MAP_ENTRY_LBA_MASK 0x3fffffffU
 #define BTT_MAP_LOCK_ALIGN ((uintptr_t)64)
+
+/*
+ * Layout of DSA jobs
+ */
+
+#define BTT_NFUTURE_PER_LANE 16
+
+#include "async.h"
+
+// This struct describes a write transaction
+struct btt_future {
+	//uint32_t lba;
+	//uint32_t old_map;
+	//uint32_t new_map;
+	struct future *future;
+	void *flog_pair;
+	int result;
+};
 
 /*
  * BTT layout properties...

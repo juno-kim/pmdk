@@ -20,3 +20,9 @@ include ../Makefile.inc
 
 CFLAGS += $(LIBNDCTL_CFLAGS)
 LIBS += -pthread -lpmem $(LIBNDCTL_LIBS)
+
+# async runtime
+ASYNC_RUNTIME_ROOT = /home/junokim/async_runtime
+CFLAGS += -I$(ASYNC_RUNTIME_ROOT)/include
+LDFLAGS +=
+LIBS +=

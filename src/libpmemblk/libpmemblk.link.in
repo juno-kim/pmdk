@@ -19,6 +19,10 @@ LIBPMEMBLK_1.0 {
 		pmemblk_nblock;
 		pmemblk_read;
 		pmemblk_write;
+		pmemblk_write_async;
+		pmemblk_write_await;
+		pmemblk_get_result;
+		pmemblk_free_future;
 		pmemblk_set_zero;
 		pmemblk_set_error;
 		pmemblk_bsize;

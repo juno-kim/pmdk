@@ -59,6 +59,7 @@
  *				read_arenas
  *				read_arena
  *				read_flogs
+ *				read_flog_pairs
  *				read_flog_pair
  *
  *	write_layout	Generates a new BTT layout when one doesn't exist.
@@ -100,6 +101,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <endian.h>
+#include <stdarg.h>
 
 #include "out.h"
 #include "uuid.h"
@@ -108,12 +110,20 @@
 #include "sys_util.h"
 #include "util.h"
 #include "alloc.h"
+#include "blk.h"
 
 /*
  * The opaque btt handle containing state tracked by this module
  * for the btt namespace.  This is created by btt_init(), handed to
  * all the other btt_* entry points, and deleted by btt_fini().
  */
+struct flog_runtime_entry {
+	struct btt_flog flog;	/* current info */
+	uint64_t entries[2];	/* offsets for flog pair */
+	int next;		/* next write (0 or 1) */
+	int owned;
+};
+
 struct btt {
 	unsigned nlane; /* number of concurrent threads allowed per btt */
 
@@ -178,9 +188,7 @@ struct btt {
 		 * The read path doesn't use the flog at all.
 		 */
 		struct flog_runtime {
-			struct btt_flog flog;	/* current info */
-			uint64_t entries[2];	/* offsets for flog pair */
-			int next;		/* next write (0 or 1) */
+			struct flog_runtime_entry entries[BTT_FLOG_PAIR_COUNT];
 		} *flogs;
 
 		/*
@@ -204,6 +212,13 @@ struct btt {
 		 * Arena info block locking.
 		 */
 		os_mutex_t info_lock;
+
+		/*
+		 * DSA Job descriptors.
+		 */
+		struct future_pool {
+			struct btt_future futures[BTT_NFUTURE_PER_LANE];
+		} *future_pools;
 	} *arenas;
 
 	/*
@@ -415,14 +430,15 @@ btt_flog_get_valid(struct btt_flog *flog_pair, int *next)
  */
 static int
 read_flog_pair(struct btt *bttp, unsigned lane, struct arena *arenap,
-	uint64_t flog_off, struct flog_runtime *flog_runtimep, uint32_t flognum)
+	uint64_t flog_off, struct flog_runtime_entry *flog_runtime_entryp, uint32_t flognum,
+	uint32_t entrynum)
 {
 	LOG(5, "bttp %p lane %u arenap %p flog_off %" PRIu64 " runtimep %p "
-		"flognum %u", bttp, lane, arenap, flog_off, flog_runtimep,
-		flognum);
+		"flognum %u entrynum %u", bttp, lane, arenap, flog_off, flog_runtime_entryp,
+		flognum, entrynum);
 
-	flog_runtimep->entries[0] = flog_off;
-	flog_runtimep->entries[1] = flog_off + sizeof(struct btt_flog);
+	flog_runtime_entryp->entries[0] = flog_off;
+	flog_runtime_entryp->entries[1] = flog_off + sizeof(struct btt_flog);
 
 	if (lane >= bttp->nfree) {
 		ERR("invalid lane %u among nfree %d", lane, bttp->nfree);
@@ -457,7 +473,7 @@ read_flog_pair(struct btt *bttp, unsigned lane, struct arena *arenap,
 			flog_pair[1].seq);
 
 	struct btt_flog *currentp = btt_flog_get_valid(flog_pair,
-		&flog_runtimep->next);
+		&flog_runtime_entryp->next);
 
 	if (currentp == NULL) {
 		ERR("flog layout error: bad seq numbers %d %d",
@@ -466,12 +482,14 @@ read_flog_pair(struct btt *bttp, unsigned lane, struct arena *arenap,
 		return 0;
 	}
 
-	LOG(6, "run-time flog next is %d", flog_runtimep->next);
+	LOG(6, "run-time flog next is %d", flog_runtime_entryp->next);
 
 	/* copy current flog into run-time flog state */
-	flog_runtimep->flog = *currentp;
+	flog_runtime_entryp->flog = *currentp;
+	flog_runtime_entryp->owned = 0;
 
-	LOG(9, "read flog[%u]: lba %u old %u%s%s%s new %u%s%s%s", flognum,
+	LOG(9, "read flog[%u][%u]: lba %u old %u%s%s%s new %u%s%s%s", flognum,
+		entrynum,
 		currentp->lba,
 		currentp->old_map & BTT_MAP_ENTRY_LBA_MASK,
 		(map_entry_is_error(currentp->old_map)) ? " ERROR" : "",
@@ -496,7 +514,8 @@ read_flog_pair(struct btt *bttp, unsigned lane, struct arena *arenap,
 	 * required.
 	 */
 	if (currentp->old_map == currentp->new_map) {
-		LOG(9, "flog[%u] entry complete (initial state)", flognum);
+		LOG(9, "flog[%u][%u] entry complete (initial state)", flognum,
+			entrynum);
 		return 0;
 	}
 
@@ -518,8 +537,8 @@ read_flog_pair(struct btt *bttp, unsigned lane, struct arena *arenap,
 
 	if (currentp->new_map != entry && currentp->old_map == entry) {
 		/* last update didn't complete */
-		LOG(9, "recover flog[%u]: map[%u]: %u",
-				flognum, currentp->lba, currentp->new_map);
+		LOG(9, "recover flog[%u][%u]: map[%u]: %u",
+				flognum, entrynum, currentp->lba, currentp->new_map);
 
 		/*
 		 * Recovery step is to complete the transaction by
@@ -533,6 +552,22 @@ read_flog_pair(struct btt *bttp, unsigned lane, struct arena *arenap,
 
 	return 0;
 }
+
+static int
+read_flog_pairs(struct btt *bttp, unsigned lane, struct arena *arenap,
+	uint64_t flog_off, struct flog_runtime *flog_runtimep, uint32_t flognum)
+{
+	for (uint32_t entrynum = 0; entrynum < BTT_FLOG_PAIR_COUNT; entrynum++) {
+		if (read_flog_pair(bttp, lane, arenap, flog_off,
+					&(flog_runtimep->entries[entrynum]), flognum, entrynum) < 0)
+			return -1;
+
+		flog_off += roundup(2 * sizeof(struct btt_flog), BTT_FLOG_PAIR_ALIGN);
+	}
+
+	return 0;
+}
+
 
 /*
  * flog_update -- (internal) write out an updated flog entry
@@ -550,6 +585,7 @@ read_flog_pair(struct btt *bttp, unsigned lane, struct arena *arenap,
  */
 static int
 flog_update(struct btt *bttp, unsigned lane, struct arena *arenap,
+		struct flog_runtime_entry *flog_pair,
 		uint32_t lba, uint32_t old_map, uint32_t new_map)
 {
 	LOG(3, "bttp %p lane %u arenap %p lba %u old_map %u new_map %u",
@@ -560,11 +596,10 @@ flog_update(struct btt *bttp, unsigned lane, struct arena *arenap,
 	new_flog.lba = lba;
 	new_flog.old_map = old_map;
 	new_flog.new_map = new_map;
-	new_flog.seq = NSEQ(arenap->flogs[lane].flog.seq);
+	new_flog.seq = NSEQ(flog_pair->flog.seq);
 	btt_flog_convert2le(&new_flog);
 
-	uint64_t new_flog_off =
-		arenap->flogs[lane].entries[arenap->flogs[lane].next];
+	uint64_t new_flog_off = flog_pair->entries[flog_pair->next];
 
 	/* write out first two fields first */
 	if ((*bttp->ns_cbp->nswrite)(bttp->ns, lane, &new_flog,
@@ -578,11 +613,11 @@ flog_update(struct btt *bttp, unsigned lane, struct arena *arenap,
 		return -1;
 
 	/* flog entry written successfully, update run-time state */
-	arenap->flogs[lane].next = 1 - arenap->flogs[lane].next;
-	arenap->flogs[lane].flog.lba = lba;
-	arenap->flogs[lane].flog.old_map = old_map;
-	arenap->flogs[lane].flog.new_map = new_map;
-	arenap->flogs[lane].flog.seq = NSEQ(arenap->flogs[lane].flog.seq);
+	flog_pair->next = 1 - flog_pair->next;
+	flog_pair->flog.lba = lba;
+	flog_pair->flog.old_map = old_map;
+	flog_pair->flog.new_map = new_map;
+	flog_pair->flog.seq = NSEQ(flog_pair->flog.seq);
 
 	LOG(9, "update flog[%u]: lba %u old %u%s%s%s new %u%s%s%s", lane, lba,
 			old_map & BTT_MAP_ENTRY_LBA_MASK,
@@ -681,7 +716,7 @@ read_flogs(struct btt *bttp, unsigned lane, struct arena *arenap)
 	}
 
 	/*
-	 * Load up the flog state.  read_flog_pair() will determine if
+	 * Load up the flog state.  read_flog_pairs() will determine if
 	 * any recovery steps are required take them on the in-memory
 	 * data structures it creates. Sets error flag when it
 	 * determines an invalid state.
@@ -689,14 +724,14 @@ read_flogs(struct btt *bttp, unsigned lane, struct arena *arenap)
 	uint64_t flog_off = arenap->flogoff;
 	struct flog_runtime *flog_runtimep = arenap->flogs;
 	for (uint32_t i = 0; i < bttp->nfree; i++) {
-		if (read_flog_pair(bttp, lane, arenap, flog_off,
+		if (read_flog_pairs(bttp, lane, arenap, flog_off,
 						flog_runtimep, i) < 0) {
 			set_arena_error(bttp, arenap, lane);
 			return -1;
 		}
 
 		/* prepare for next time around the loop */
-		flog_off += roundup(2 * sizeof(struct btt_flog),
+		flog_off += BTT_FLOG_PAIR_COUNT * roundup(2 * sizeof(struct btt_flog),
 				BTT_FLOG_PAIR_ALIGN);
 		flog_runtimep++;
 	}
@@ -748,6 +783,39 @@ build_map_locks(struct btt *bttp, struct arena *arenap)
 	return 0;
 }
 
+static int
+future_init(struct btt_future *future) {
+	// TODO
+	return 0;
+}
+
+static int
+future_pool_init(struct future_pool *pool) {
+	for (uint32_t i = 0; i < BTT_NFUTURE_PER_LANE; i++) {
+		if (future_init(&pool->futures[i]) < 0)
+			return -1;
+	}
+	return 0;
+}
+
+static int
+build_future_pools(struct btt *bttp, struct arena *arenap)
+{
+	if ((arenap->future_pools =
+			Malloc(bttp->nfree * sizeof(*arenap->future_pools)))
+				== NULL) {
+
+		ERR("!Malloc for %d dsa job entries", bttp->nfree);
+		return -1;
+	}
+
+	for (uint32_t lane = 0; lane < bttp->nfree; lane++)
+		if (future_pool_init(&arenap->future_pools[lane]) < 0)
+			return -1;
+
+	return 0;
+}
+
 /*
  * read_arena -- (internal) load up an arena and build run-time state
  *
@@ -783,6 +851,10 @@ read_arena(struct btt *bttp, unsigned lane, uint64_t arena_off,
 		return -1;
 
 	if (build_map_locks(bttp, arenap) < 0)
+		return -1;
+
+	/* initialize futures */
+	if (build_future_pools(bttp, arenap) < 0)
 		return -1;
 
 	/* initialize the per arena info block lock */
@@ -937,7 +1009,7 @@ internal_lbasize(uint32_t external_lbasize)
 uint64_t
 btt_flog_size(uint32_t nfree)
 {
-	uint64_t flog_size = nfree * roundup(2 * sizeof(struct btt_flog),
+	uint64_t flog_size = nfree * BTT_FLOG_PAIR_COUNT * roundup(2 * sizeof(struct btt_flog),
 		BTT_FLOG_PAIR_ALIGN);
 	return roundup(flog_size, BTT_ALIGNMENT);
 }
@@ -1158,7 +1230,7 @@ write_layout(struct btt *bttp, unsigned lane, int write)
 		/* write out the initial flog */
 		uint64_t flog_entry_off = arena_off + info.flogoff;
 		uint32_t next_free_lba = info.external_nlba;
-		for (uint32_t i = 0; i < bttp->nfree; i++) {
+		for (uint32_t i = 0; i < bttp->nfree * BTT_FLOG_PAIR_COUNT; i++) {
 			struct btt_flog flog;
 			flog.lba = htole32(i);
 			flog.old_map = flog.new_map =
@@ -1708,6 +1780,18 @@ btt_write(struct btt *bttp, unsigned lane, uint64_t lba, const void *buf)
 		return -1;
 	}
 
+	// find a free flog entry
+	struct flog_runtime *runtime = &arenap->flogs[lane];
+	struct flog_runtime_entry *flog_pair;
+	uint32_t entrynum = 0;
+	while (runtime->entries[entrynum].owned) {
+		entrynum++;
+		if (entrynum == BTT_FLOG_PAIR_COUNT)
+			entrynum = 0;
+	}
+	flog_pair = &runtime->entries[entrynum];
+	flog_pair->owned = 1;
+
 	/*
 	 * This routine was passed a unique "lane" which is an index
 	 * into the flog.  That means the free block held by flog[lane]
@@ -1717,11 +1801,11 @@ btt_write(struct btt *bttp, unsigned lane, uint64_t lba, const void *buf)
 	 * doesn't appear in the read tracking table, so scan that first
 	 * and if found, wait for the thread reading from it to finish.
 	 */
-	uint32_t free_entry = (arenap->flogs[lane].flog.old_map &
+	uint32_t free_entry = (flog_pair->flog.old_map &
 			BTT_MAP_ENTRY_LBA_MASK) | BTT_MAP_ENTRY_NORMAL;
 
 	LOG(3, "free_entry %u (before mask %u)", free_entry,
-				arenap->flogs[lane].flog.old_map);
+				flog_pair->flog.old_map);
 
 	/* wait for other threads to finish any reads on free block */
 	for (unsigned i = 0; i < bttp->nlane; i++)
@@ -1733,22 +1817,27 @@ btt_write(struct btt *bttp, unsigned lane, uint64_t lba, const void *buf)
 		(uint64_t)(free_entry & BTT_MAP_ENTRY_LBA_MASK) *
 		arenap->internal_lbasize;
 	if ((*bttp->ns_cbp->nswrite)(bttp->ns, lane, buf,
-				bttp->lbasize, data_block_off) < 0)
+				bttp->lbasize, data_block_off) < 0) {
+		flog_pair->owned = 0;
 		return -1;
+	}
 
 	/*
 	 * Make the new block active atomically by updating the on-media flog
 	 * and then updating the map.
 	 */
 	uint32_t old_entry;
-	if (map_lock(bttp, lane, arenap, &old_entry, premap_lba) < 0)
+	if (map_lock(bttp, lane, arenap, &old_entry, premap_lba) < 0) {
+		flog_pair->owned = 0;
 		return -1;
+	}
 
 	old_entry = le32toh(old_entry);
 
 	/* update the flog */
-	if (flog_update(bttp, lane, arenap, premap_lba,
+	if (flog_update(bttp, lane, arenap, flog_pair, premap_lba,
 					old_entry, free_entry) < 0) {
+		flog_pair->owned = 0;
 		map_abort(bttp, lane, arenap, premap_lba);
 		return -1;
 	}
@@ -1759,11 +1848,167 @@ btt_write(struct btt *bttp, unsigned lane, uint64_t lba, const void *buf)
 		 * A critical write error occurred, set the arena's
 		 * info block error bit.
 		 */
+		flog_pair->owned = 0;
 		set_arena_error(bttp, arenap, lane);
 		errno = EIO;
 		return -1;
 	}
 
+	flog_pair->owned = 0;
+
+	return 0;
+}
+
+struct update_mapping_args {
+	struct btt *bttp;
+	unsigned lane;
+	struct arena *arenap;
+	unsigned premap_lba;
+	struct flog_runtime_entry *flog_pair;
+	uint32_t free_entry;
+};
+
+static struct update_mapping_args *
+get_update_mapping_args(struct btt *bttp, unsigned lane, struct arena *arenap,
+		unsigned premap_lba, struct flog_runtime_entry *flog_pair, uint32_t free_entry)
+{
+	struct update_mapping_args *args = Malloc(sizeof(*args));
+	args->bttp = bttp;
+	args->lane = lane;
+	args->arenap = arenap;
+	args->premap_lba = premap_lba;
+	args->flog_pair = flog_pair;
+	args->free_entry = free_entry;
+
+	return args;
+}
+
+static
+int update_mapping(void *args)
+{
+	struct update_mapping_args *fargs = (struct update_mapping_args *)args;
+	struct btt *bttp = fargs->bttp;
+	unsigned lane = fargs->lane;
+	struct arena *arenap = fargs->arenap;
+	unsigned premap_lba = fargs->premap_lba;
+	struct flog_runtime_entry *flog_pair = fargs->flog_pair;
+	uint32_t free_entry = fargs->free_entry;
+
+	uint32_t old_entry;
+	if (map_lock(bttp, lane, arenap, &old_entry, premap_lba) < 0) {
+		flog_pair->owned = 0;
+		return -1;
+	}
+
+	old_entry = le32toh(old_entry);
+
+	if (flog_update(bttp, lane, arenap, flog_pair, premap_lba,
+					old_entry, free_entry) < 0) {
+		flog_pair->owned = 0;
+		map_abort(bttp, lane, arenap, premap_lba);
+		return -1;
+	}
+
+	if (map_unlock(bttp, lane, arenap, htole32(free_entry),
+					premap_lba) < 0) {
+		flog_pair->owned = 0;
+		set_arena_error(bttp, arenap, lane);
+		errno = EIO;
+		return -1;
+	}
+
+	flog_pair->owned = 0;
+
+	return 0;
+}
+
+struct btt_future *
+btt_write_async(struct btt *bttp, unsigned lane, uint64_t lba, const void *buf)
+{
+	LOG(3, "bttp %p lane %u lba %" PRIu64, bttp, lane, lba);
+
+	if (invalid_lba(bttp, lba))
+		return NULL;
+
+	/* first write through here will initialize the metadata layout */
+	if (!bttp->laidout) {
+		int err = 0;
+
+		util_mutex_lock(&bttp->layout_write_mutex);
+
+		if (!bttp->laidout)
+			err = write_layout(bttp, lane, 1);
+
+		util_mutex_unlock(&bttp->layout_write_mutex);
+
+		if (err < 0)
+			return NULL;
+	}
+
+	/* find which arena LBA lives in, and the offset to the map entry */
+	struct arena *arenap;
+	uint32_t premap_lba;
+	if (lba_to_arena_lba(bttp, lba, &arenap, &premap_lba) < 0)
+		return NULL;
+
+	/* if the arena is in an error state, writing is not allowed */
+	if (arenap->flags & BTTINFO_FLAG_ERROR_MASK) {
+		ERR("EIO due to btt_info error flags 0x%x",
+			arenap->flags & BTTINFO_FLAG_ERROR_MASK);
+		errno = EIO;
+		return NULL;
+	}
+
+	// find a free flog entry
+	struct flog_runtime *runtime = &arenap->flogs[lane];
+	struct flog_runtime_entry *flog_pair;
+	uint32_t entrynum = 0;
+	while (runtime->entries[entrynum].owned) {
+		entrynum++;
+		if (entrynum == BTT_FLOG_PAIR_COUNT)
+			entrynum = 0;
+	}
+	flog_pair = &runtime->entries[entrynum];
+	flog_pair->owned = 1;
+
+	uint32_t free_entry = (flog_pair->flog.old_map &
+			BTT_MAP_ENTRY_LBA_MASK) | BTT_MAP_ENTRY_NORMAL;
+
+	LOG(3, "free_entry %u (before mask %u)", free_entry,
+				flog_pair->flog.old_map);
+
+	/* wait for other threads to finish any reads on free block */
+	for (unsigned i = 0; i < bttp->nlane; i++)
+		while (arenap->rtt[i] == free_entry)
+			;
+
+	// Get the free block address
+	uint64_t off = arenap->dataoff +
+		(uint64_t)(free_entry & BTT_MAP_ENTRY_LBA_MASK) *
+		arenap->internal_lbasize;
+	struct pmemblk *pbp = (struct pmemblk *)bttp->ns;
+	void *dest = (char *)pbp->data + off;
+
+	// Create a chained future
+	struct future *fut_memcpy, *fut_update_map;
+	fut_memcpy = async_memcpy(dest, buf, bttp->lbasize, 0);
+	struct update_mapping_args *umargs = get_update_mapping_args(bttp, lane, arenap,
+											premap_lba, flog_pair, free_entry);
+	fut_update_map = async_generic(update_mapping, umargs);
+
+	struct btt_future *bfut = Malloc(sizeof(bfut));
+	bfut->future = chained_future(2, fut_memcpy, fut_update_map);
+	bfut->flog_pair = flog_pair;
+	bfut->result = 0;
+
+	return bfut;
+}
+
+int
+btt_write_await(struct btt_future *future)
+{
+	await(future->future);
+	//future->result = future->future->result;
 	return 0;
 }
 
@@ -1955,7 +2200,7 @@ check_arena(struct btt *bttp, struct arena *arenap)
 	 * run-time flog here, avoiding more calls to nsread.
 	 */
 	for (uint32_t i = 0; i < bttp->nfree; i++) {
-		uint32_t entry = arenap->flogs[i].flog.old_map;
+		uint32_t entry = arenap->flogs[i].entries[0].flog.old_map;
 		entry &= BTT_MAP_ENTRY_LBA_MASK;
 
 		if (util_isset(bitmap, entry)) {
