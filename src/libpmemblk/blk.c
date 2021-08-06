@@ -701,8 +701,8 @@ pmemblk_write(PMEMblkpool *pbp, const void *buf, long long blockno)
 	return err;
 }
 
-PMEMblk_future *
-pmemblk_write_async(PMEMblkpool *pbp, const void *buf, long long blockno)
+struct future *
+pmemblk_write_async(struct runtime *rt, PMEMblkpool *pbp, const void *buf, long long blockno)
 {
 	LOG(3, "pbp %p buf %p blockno %lld", pbp, buf, blockno);
 
@@ -722,50 +722,16 @@ pmemblk_write_async(PMEMblkpool *pbp, const void *buf, long long blockno)
 
 	lane_enter(pbp, &lane);
 
-	struct btt_future *bfut= btt_write_async(pbp->bttp, lane, (uint64_t)blockno, buf);
+	struct future *fut= btt_write_async(rt, pbp->bttp, lane, (uint64_t)blockno, buf);
 
 	lane_exit(pbp, lane);
 
-	if (bfut == NULL) {
+	if (fut == NULL) {
 		ERR("btt returns NULL future");
 		errno = EIO;
-		return NULL;
 	}
 
-	PMEMblk_future *pfut = Malloc(sizeof(PMEMblk_future));
-	pfut->future = bfut;
-
-	return pfut;
-}
-
-int
-pmemblk_write_await(PMEMblkpool *pbp, PMEMblk_future *fut)
-{
-	int ret = btt_write_await(fut->future);
-
-	return 0;
-}
-
-int
-pmemblk_get_result(PMEMblkpool *pbp, PMEMblk_future *fut)
-{
-	return fut->future->result;
-}
-
-int
-pmemblk_free_future(PMEMblkpool *pbp, PMEMblk_future *fut)
-{
-	if (fut->future) {
-		if (fut->future->future) {
-			free_future(fut->future->future);
-		}
-
-		Free(fut->future);
-	}
-
-	Free(fut);
-
-	return 0;
+	return fut;
 }
 
 /*

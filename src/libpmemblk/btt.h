@@ -40,8 +40,9 @@ int btt_check(struct btt *bttp);
 void btt_fini(struct btt *bttp);
 
 // async
-struct btt_future *btt_write_async(struct btt *bttp, unsigned lane, uint64_t lba, const void *buf);
-int btt_write_await(struct btt_future *future);
+struct runtime;
+struct future *btt_write_async(struct runtime *rt, struct btt *bttp,
+		unsigned lane, uint64_t lba, const void *buf);
 
 uint64_t btt_flog_size(uint32_t nfree);
 uint64_t btt_map_size(uint32_t external_nlba);

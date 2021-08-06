@@ -93,24 +93,6 @@ struct btt_flog {
 #define BTT_MAP_LOCK_ALIGN ((uintptr_t)64)
 
 /*
- * Layout of DSA jobs
- */
-
-#define BTT_NFUTURE_PER_LANE 16
-
-#include "async.h"
-
-// This struct describes a write transaction
-struct btt_future {
-	//uint32_t lba;
-	//uint32_t old_map;
-	//uint32_t new_map;
-	struct future *future;
-	void *flog_pair;
-	int result;
-};
-
-/*
  * BTT layout properties...
  */
 #define BTT_MIN_SIZE ((1u << 20) * 16)

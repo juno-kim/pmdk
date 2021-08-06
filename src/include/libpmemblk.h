@@ -49,7 +49,6 @@ extern "C" {
  * opaque type, internal to libpmemblk
  */
 typedef struct pmemblk PMEMblkpool;
-typedef struct pmemblk_future PMEMblk_future;
 
 /*
  * PMEMBLK_MAJOR_VERSION and PMEMBLK_MINOR_VERSION provide the current version
@@ -128,11 +127,9 @@ int pmemblk_set_zero(PMEMblkpool *pbp, long long blockno);
 int pmemblk_set_error(PMEMblkpool *pbp, long long blockno);
 
 // Async operations
-PMEMblk_future *pmemblk_write_async(PMEMblkpool *pbp,
+struct runtime;
+struct future *pmemblk_write_async(struct runtime *rt, PMEMblkpool *pbp,
 		const void *buf, long long blockno);
-int pmemblk_write_await(PMEMblkpool *pbp, PMEMblk_future *fut);
-int pmemblk_get_result(PMEMblkpool *pbp, PMEMblk_future *fut);
-int pmemblk_free_future(PMEMblkpool *pbp, PMEMblk_future *fut);
 
 /*
  * Passing NULL to pmemblk_set_funcs() tells libpmemblk to continue to use the

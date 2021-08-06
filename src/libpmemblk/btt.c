@@ -111,6 +111,7 @@
 #include "util.h"
 #include "alloc.h"
 #include "blk.h"
+#include "async.h"
 
 /*
  * The opaque btt handle containing state tracked by this module
@@ -212,13 +213,6 @@ struct btt {
 		 * Arena info block locking.
 		 */
 		os_mutex_t info_lock;
-
-		/*
-		 * DSA Job descriptors.
-		 */
-		struct future_pool {
-			struct btt_future futures[BTT_NFUTURE_PER_LANE];
-		} *future_pools;
 	} *arenas;
 
 	/*
@@ -783,39 +777,6 @@ build_map_locks(struct btt *bttp, struct arena *arenap)
 	return 0;
 }
 
-static int
-future_init(struct btt_future *future) {
-	// TODO
-	return 0;
-}
-
-static int
-future_pool_init(struct future_pool *pool) {
-	for (uint32_t i = 0; i < BTT_NFUTURE_PER_LANE; i++) {
-		if (future_init(&pool->futures[i]) < 0)
-			return -1;
-	}
-	return 0;
-}
-
-static int
-build_future_pools(struct btt *bttp, struct arena *arenap)
-{
-	if ((arenap->future_pools =
-			Malloc(bttp->nfree * sizeof(*arenap->future_pools)))
-				== NULL) {
-
-		ERR("!Malloc for %d dsa job entries", bttp->nfree);
-		return -1;
-	}
-
-	for (uint32_t lane = 0; lane < bttp->nfree; lane++)
-		if (future_pool_init(&arenap->future_pools[lane]) < 0)
-			return -1;
-
-	return 0;
-}
-
 /*
  * read_arena -- (internal) load up an arena and build run-time state
  *
@@ -851,10 +812,6 @@ read_arena(struct btt *bttp, unsigned lane, uint64_t arena_off,
 		return -1;
 
 	if (build_map_locks(bttp, arenap) < 0)
-		return -1;
-
-	/* initialize futures */
-	if (build_future_pools(bttp, arenap) < 0)
 		return -1;
 
 	/* initialize the per arena info block lock */
@@ -1922,8 +1879,9 @@ int update_mapping(void *args)
 	return 0;
 }
 
-struct btt_future *
-btt_write_async(struct btt *bttp, unsigned lane, uint64_t lba, const void *buf)
+struct future *
+btt_write_async(struct runtime *rt, struct btt *bttp, unsigned lane,
+		uint64_t lba, const void *buf)
 {
 	LOG(3, "bttp %p lane %u lba %" PRIu64, bttp, lane, lba);
 
@@ -1990,26 +1948,15 @@ btt_write_async(struct btt *bttp, unsigned lane, uint64_t lba, const void *buf)
 	void *dest = (char *)pbp->data + off;
 
 	// Create a chained future
-	struct future *fut_memcpy, *fut_update_map;
-	fut_memcpy = async_memcpy(dest, buf, bttp->lbasize, 0);
+	struct future *fut_memcpy, *fut_update_map, *fut_chained;
+	fut_memcpy = async_memcpy(rt, dest, buf, bttp->lbasize, 0);
 	struct update_mapping_args *umargs = get_update_mapping_args(bttp, lane, arenap,
 											premap_lba, flog_pair, free_entry);
-	fut_update_map = async_generic(update_mapping, umargs);
+	fut_update_map = async_generic(rt, update_mapping, umargs);
 
-	struct btt_future *bfut = Malloc(sizeof(bfut));
-	bfut->future = chained_future(2, fut_memcpy, fut_update_map);
-	bfut->flog_pair = flog_pair;
-	bfut->result = 0;
+	fut_chained = chained_future(rt, 2, fut_memcpy, fut_update_map);
 
-	return bfut;
-}
-
-int
-btt_write_await(struct btt_future *future)
-{
-	await(future->future);
-	//future->result = future->future->result;
-	return 0;
+	return fut_chained;
 }
 
 /*

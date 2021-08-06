@@ -95,10 +95,6 @@ pmemblk_fault_injection_enabled(void)
 }
 #endif
 
-struct pmemblk_future {
-	struct btt_future *future;
-};
-
 #ifdef __cplusplus
 }
 #endif
