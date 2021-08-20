@@ -1949,12 +1949,13 @@ btt_write_async(struct runtime *rt, struct btt *bttp, unsigned lane,
 
 	// Create a chained future
 	struct future *fut_memcpy, *fut_update_map, *fut_chained;
-	fut_memcpy = async_memcpy(rt, dest, buf, bttp->lbasize, 0);
+	int memcpy_flags = DATA_OP_FLAG_PERSIST | DATA_OP_FLAG_DONT_INVALIDATE_CACHE | DATA_OP_FLAG_FENCE;
+	fut_memcpy = ar_async_memcpy(rt, dest, buf, bttp->lbasize, memcpy_flags);
 	struct update_mapping_args *umargs = get_update_mapping_args(bttp, lane, arenap,
 											premap_lba, flog_pair, free_entry);
-	fut_update_map = async_generic(rt, update_mapping, umargs);
+	fut_update_map = ar_async_generic(rt, update_mapping, umargs);
 
-	fut_chained = chained_future(rt, 2, fut_memcpy, fut_update_map);
+	fut_chained = ar_chain_futures(rt, 2, fut_memcpy, fut_update_map);
 
 	return fut_chained;
 }

@@ -42,6 +42,9 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
+	struct runtime *rt;
+	rt = ar_create_runtime();
+
 	/* how many elements fit into the file? */
 	nelements = pmemblk_nblock(pbp);
 	printf("file holds %zu elements\n", nelements);
@@ -55,12 +58,16 @@ main(int argc, char *argv[])
 
 	/* store a block at index 7 "asynchronously" */
 	struct future *future;
-	if ((future = pmemblk_write_async(pbp, buf, 7)) == NULL) {
+	if ((future = pmemblk_write_async(rt, pbp, buf, 7)) == NULL) {
 		perror("pmemblk_write_async");
 		exit(1);
 	}
 
-	await(future);
+	ar_await_future(rt, future);
+
+	ar_free_future(rt, future);
+
+	ar_delete_runtime(rt);
 
 	pmemblk_close(pbp);
 	return 0;
