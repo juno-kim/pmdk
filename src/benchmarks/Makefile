@@ -90,6 +90,19 @@ ifeq ($(LIBRT_NEEDED), y)
 LIBS += -lrt
 endif
 
+# Async runtime
+ASYNC_RUNTIME_ROOT=/home/junokim/async_runtime
+INCS += -I$(ASYNC_RUNTIME_ROOT)
+LDFLAGS += -L$(ASYNC_RUNTIME_ROOT)
+LIBS += -l:libasync.a
+
+# DML
+DML_ROOT=$(ASYNC_RUNTIME_ROOT)/dml
+INCS += -I$(DML_ROOT)/include
+LDFLAGS += -L$(DML_ROOT)/build
+LIBS += -l:libdml.a
+
+
 CXXFLAGS = -Wall
 CXXFLAGS += -Werror
 CXXFLAGS += -std=c++11

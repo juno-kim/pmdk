@@ -21,6 +21,18 @@ CFLAGS += -Wpointer-arith
 CFLAGS += -Wsign-conversion
 CFLAGS += -Wsign-compare
 
+# async runtime
+ASYNC_RUNTIME_ROOT=/home/junokim/async_runtime
+INCS += -I$(ASYNC_RUNTIME_ROOT)
+LDFLAGS += -L$(ASYNC_RUNTIME_ROOT)
+LIBS += -l:libasync.a
+
+# DML lib
+DML_ROOT=$(ASYNC_RUNTIME_ROOT)/dml
+INCS += -I$(DML_ROOT)/include
+LDFLAGS += -L$(DML_ROOT)/build
+LIBS += -l:libdml.a
+
 ifeq ($(WCONVERSION_AVAILABLE), y)
 CFLAGS += -Wconversion
 endif

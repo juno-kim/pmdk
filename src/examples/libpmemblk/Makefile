@@ -11,8 +11,6 @@ LIBS = -lpmemblk -lpmem -pthread
 
 include ../Makefile.inc
 
-INCS += -I/home/junokim/async_runtime/include
-
 manpage: manpage.o
 
 async: async.o

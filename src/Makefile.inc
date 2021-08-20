@@ -121,6 +121,15 @@ else
 CFLAGS += $(EXTRA_CFLAGS_RELEASE)
 endif
 
+# Async runtime
+ASYNC_RUNTIME_ROOT=/home/junokim/async_runtime
+INCS += -I$(ASYNC_RUNTIME_ROOT)
+LDFLAGS += -L$(ASYNC_RUNTIME_ROOT)
+LIBS += -l:libasync.a
+
+CQ_ROOT=/home/junokim/concurrentqueue
+INCS += -I$(CQ_ROOT)
+
 LDFLAGS += -Wl,-z,relro -Wl,--fatal-warnings -Wl,--warn-common $(EXTRA_LDFLAGS)
 
 ifneq ($(NORPATH),1)

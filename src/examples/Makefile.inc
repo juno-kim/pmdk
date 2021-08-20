@@ -26,6 +26,20 @@ endif
 INCS = -I$(INCDIR) -I. -I$(TOP_SRC)/examples $(OS_INCS)
 LIBS += $(OS_LIBS) $(LIBUUID)
 
+# async runtime
+ASYNC_RUNTIME_ROOT=/home/junokim/async_runtime
+INCS += -I$(ASYNC_RUNTIME_ROOT)
+LDFLAGS += -L$(ASYNC_RUNTIME_ROOT)
+LIBS += -l:libasync.a
+
+# DML
+DML_ROOT=$(ASYNC_RUNTIME_ROOT)/dml
+INCS += -I$(DML_ROOT)/include
+LDFLAGS += -L$(DML_ROOT)/build
+LIBS += -l:libdml.a
+
+LIBS += -ldl
+
 LINKER=$(CC)
 ifeq ($(COMPILE_LANG), cpp)
 LINKER=$(CXX)
