@@ -30,5 +30,5 @@ LIBS +=
 # DML
 DML_ROOT = $(ASYNC_RUNTIME_ROOT)/dml
 CFLAGS += -I$(DML_ROOT)/include
-LDFLAGS +=
-LIBS +=
+LDFLAGS += -L$(DML_ROOT)/build
+LIBS += -l:libdml.a
